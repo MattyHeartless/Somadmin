@@ -1,0 +1,7 @@
+node_modules/
+.next/
+.tools/
+backend/**/bin/
+backend/**/obj/
+appsettings.Development.json
+.env.local
