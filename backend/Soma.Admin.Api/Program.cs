@@ -201,7 +201,18 @@ admin.MapGet("/events/{eventId:guid}", async (Guid eventId, SomaDbContext db, Ca
 admin.MapGet("/events/{eventId:guid}/reservations", async (Guid eventId, SomaDbContext db, CancellationToken cancellationToken) =>
     await db.Reservations.AsNoTracking().Where(reservation => reservation.EventId == eventId)
         .OrderByDescending(reservation => reservation.CreatedAt)
-        .Select(reservation => new ReservationSummary(reservation.Id, reservation.EventId, reservation.ClientId, reservation.Status, reservation.CreatedAt, reservation.CheckedInAt, reservation.CheckedOutAt))
+        .Select(reservation => new ReservationSummary(
+            reservation.Id,
+            reservation.EventId,
+            reservation.Event!.Title,
+            reservation.ClientId,
+            reservation.Client!.User!.FirstName,
+            reservation.Client.User.LastName,
+            reservation.Client.User.Email!,
+            reservation.Status,
+            reservation.CreatedAt,
+            reservation.CheckedInAt,
+            reservation.CheckedOutAt))
         .ToListAsync(cancellationToken));
 admin.MapGet("/events/{eventId:guid}/images", async (Guid eventId, SomaDbContext db, CancellationToken cancellationToken) =>
     await db.EventImages.AsNoTracking().Where(image => image.EventId == eventId)
@@ -264,8 +275,36 @@ admin.MapGet("/dashboard", async (SomaDbContext db, CancellationToken cancellati
 });
 admin.MapGet("/reservations", async (SomaDbContext db, CancellationToken cancellationToken) =>
     await db.Reservations.AsNoTracking().OrderByDescending(reservation => reservation.CreatedAt)
-        .Select(reservation => new ReservationSummary(reservation.Id, reservation.EventId, reservation.ClientId, reservation.Status, reservation.CreatedAt, reservation.CheckedInAt, reservation.CheckedOutAt))
+        .Select(reservation => new ReservationSummary(
+            reservation.Id,
+            reservation.EventId,
+            reservation.Event!.Title,
+            reservation.ClientId,
+            reservation.Client!.User!.FirstName,
+            reservation.Client.User.LastName,
+            reservation.Client.User.Email!,
+            reservation.Status,
+            reservation.CreatedAt,
+            reservation.CheckedInAt,
+            reservation.CheckedOutAt))
         .ToListAsync(cancellationToken));
+admin.MapGet("/reservations/{reservationId:guid}", async (Guid reservationId, SomaDbContext db, CancellationToken cancellationToken) =>
+{
+    var reservation = await db.Reservations.AsNoTracking()
+        .Where(item => item.Id == reservationId)
+        .Select(item => new ReservationDetail(
+            item.Id,
+            item.Status,
+            item.CreatedAt,
+            item.CheckedInAt,
+            item.CheckedOutAt,
+            item.CancelledAt,
+            item.NoShowAt,
+            new EventReference(item.EventId, item.Event!.Title, item.Event.StartsAt, item.Event.Status),
+            new ClientReference(item.ClientId, item.Client!.User!.FirstName, item.Client.User.LastName, item.Client.User.Email!, item.Client.User.PhoneNumber)))
+        .SingleOrDefaultAsync(cancellationToken);
+    return reservation is null ? Results.NotFound(new { code = "RESERVATION_NOT_FOUND" }) : Results.Ok(reservation);
+});
 admin.MapPost("/reservations/{reservationId:guid}/cancel", async (Guid reservationId, SomaDbContext db, CancellationToken cancellationToken) =>
 {
     var reservation = await db.Reservations.SingleOrDefaultAsync(item => item.Id == reservationId, cancellationToken);
@@ -290,7 +329,16 @@ admin.MapGet("/access-logs", async (Guid? eventId, SomaDbContext db, Cancellatio
     var query = db.AccessLogs.AsNoTracking().OrderByDescending(log => log.CreatedAt).AsQueryable();
     if (eventId is not null) query = query.Where(log => log.EventId == eventId);
     return await query.Take(200)
-        .Select(log => new AccessLogSummary(log.Id, log.ReservationId, log.EventId, log.StaffUserId, log.Action, log.Result, log.CreatedAt))
+        .Select(log => new AccessLogSummary(
+            log.Id,
+            log.ReservationId,
+            log.EventId,
+            log.StaffUserId,
+            log.Action,
+            log.Result,
+            log.CreatedAt,
+            db.Events.Where(item => item.Id == log.EventId).Select(item => item.Title).FirstOrDefault(),
+            db.Reservations.Where(item => item.Id == log.ReservationId).Select(item => item.Client!.User!.FirstName + " " + item.Client.User.LastName).FirstOrDefault()))
         .ToListAsync(cancellationToken);
 });
 admin.MapGet("/clients", async (SomaDbContext db, CancellationToken cancellationToken) =>
@@ -298,6 +346,18 @@ admin.MapGet("/clients", async (SomaDbContext db, CancellationToken cancellation
         .OrderByDescending(client => client.CreatedAt)
         .Select(client => new ClientSummary(client.Id, client.User!.FirstName, client.User.LastName, client.User.Email!, client.User.PhoneNumber))
         .ToListAsync(cancellationToken));
+admin.MapGet("/clients/{clientId:guid}", async (Guid clientId, SomaDbContext db, CancellationToken cancellationToken) =>
+{
+    var client = await db.ClientProfiles.AsNoTracking().Include(item => item.User)
+        .SingleOrDefaultAsync(item => item.Id == clientId, cancellationToken);
+    if (client?.User is null) return Results.NotFound(new { code = "CLIENT_NOT_FOUND" });
+
+    var reservations = await db.Reservations.AsNoTracking().Where(item => item.ClientId == clientId)
+        .OrderByDescending(item => item.CreatedAt)
+        .Select(item => new ClientReservationSummary(item.Id, item.EventId, item.Event!.Title, item.Event.StartsAt, item.Status, item.CreatedAt, item.CheckedInAt, item.CheckedOutAt))
+        .ToListAsync(cancellationToken);
+    return Results.Ok(new ClientDetail(client.Id, client.User.FirstName, client.User.LastName, client.User.Email!, client.User.PhoneNumber, client.CreatedAt, reservations));
+});
 admin.MapPost("/clients", async (CreateClientRequest request, SomaDbContext db, UserManager<ApplicationUser> users) =>
 {
     var user = new ApplicationUser
@@ -330,6 +390,14 @@ admin.MapGet("/staff", async (UserManager<ApplicationUser> users, CancellationTo
             response.Add(new StaffSummary(user.Id, user.FirstName, user.LastName, user.Email!, user.IsActive, [.. roles]));
     }
     return Results.Ok(response);
+});
+admin.MapGet("/staff/{userId}", async (string userId, UserManager<ApplicationUser> users) =>
+{
+    var user = await users.FindByIdAsync(userId);
+    if (user is null) return Results.NotFound(new { code = "STAFF_NOT_FOUND" });
+    var roles = await users.GetRolesAsync(user);
+    if (!roles.Any(role => role is "Admin" or "AccessStaff")) return Results.NotFound(new { code = "STAFF_NOT_FOUND" });
+    return Results.Ok(new StaffDetail(user.Id, user.FirstName, user.LastName, user.Email!, user.PhoneNumber, user.IsActive, user.CreatedAt, [.. roles]));
 });
 admin.MapPost("/staff", async (CreateStaffRequest request, UserManager<ApplicationUser> users) =>
 {
@@ -408,6 +476,11 @@ app.MapPost("/api/public/events/{slug}/reservations", async (
 });
 
 var access = app.MapGroup("/api/access").RequireAuthorization("AccessOperator");
+access.MapGet("/active-event", async (SomaDbContext db, CancellationToken cancellationToken) =>
+    Results.Ok(await db.Events.AsNoTracking().Where(item => item.Status == EventStatus.Active)
+        .OrderBy(item => item.StartsAt)
+        .Select(item => new EventSummary(item.Id, item.Title, item.Slug, item.StartsAt, item.EndsAt, item.Capacity, item.OccupiedSlots, item.Status))
+        .FirstOrDefaultAsync(cancellationToken)));
 access.MapPost("/check-in", async (AccessRequest request, ClaimsPrincipal principal, AccessService service, CancellationToken cancellationToken) =>
     Results.Json(await service.CheckInAsync(request.EventId, request.Token, principal.FindFirstValue(ClaimTypes.NameIdentifier)!, cancellationToken)));
 access.MapPost("/check-out", async (AccessRequest request, ClaimsPrincipal principal, AccessService service, CancellationToken cancellationToken) =>
@@ -472,12 +545,18 @@ record UpdateEventRequest(string Title, string Slug, string? Description, DateTi
 record EventSummary(Guid Id, string Title, string Slug, DateTimeOffset StartsAt, DateTimeOffset EndsAt, int Capacity, int OccupiedSlots, EventStatus Status);
 record CreateReservationRequest(Guid ClientId, string QrToken);
 record AccessRequest(Guid EventId, string Token);
-record ReservationSummary(Guid Id, Guid EventId, Guid ClientId, ReservationStatus Status, DateTimeOffset CreatedAt, DateTimeOffset? CheckedInAt, DateTimeOffset? CheckedOutAt);
+record ReservationSummary(Guid Id, Guid EventId, string EventTitle, Guid ClientId, string ClientFirstName, string ClientLastName, string ClientEmail, ReservationStatus Status, DateTimeOffset CreatedAt, DateTimeOffset? CheckedInAt, DateTimeOffset? CheckedOutAt);
+record EventReference(Guid Id, string Title, DateTimeOffset StartsAt, EventStatus Status);
+record ClientReference(Guid Id, string FirstName, string LastName, string Email, string? PhoneNumber);
+record ReservationDetail(Guid Id, ReservationStatus Status, DateTimeOffset CreatedAt, DateTimeOffset? CheckedInAt, DateTimeOffset? CheckedOutAt, DateTimeOffset? CancelledAt, DateTimeOffset? NoShowAt, EventReference Event, ClientReference Client);
 record ClientSummary(Guid Id, string FirstName, string LastName, string Email, string? PhoneNumber);
+record ClientReservationSummary(Guid Id, Guid EventId, string EventTitle, DateTimeOffset EventStartsAt, ReservationStatus Status, DateTimeOffset CreatedAt, DateTimeOffset? CheckedInAt, DateTimeOffset? CheckedOutAt);
+record ClientDetail(Guid Id, string FirstName, string LastName, string Email, string? PhoneNumber, DateTimeOffset CreatedAt, List<ClientReservationSummary> Reservations);
 record CreateClientRequest(string FirstName, string LastName, string Email, string Password, string? PhoneNumber);
 record CreateStaffRequest(string FirstName, string LastName, string Email, string Password, string Role);
 record ResetPasswordRequest(string NewPassword);
 record StaffSummary(string Id, string FirstName, string LastName, string Email, bool IsActive, string[] Roles);
-record AccessLogSummary(Guid Id, Guid? ReservationId, Guid? EventId, string StaffUserId, string Action, string Result, DateTimeOffset CreatedAt);
+record StaffDetail(string Id, string FirstName, string LastName, string Email, string? PhoneNumber, bool IsActive, DateTimeOffset CreatedAt, string[] Roles);
+record AccessLogSummary(Guid Id, Guid? ReservationId, Guid? EventId, string StaffUserId, string Action, string Result, DateTimeOffset CreatedAt, string? EventTitle, string? ClientName);
 record AddEventImageRequest(string ImageUrl, int DisplayOrder);
 record EventImageSummary(Guid Id, string ImageUrl, int DisplayOrder);

@@ -12,26 +12,10 @@ import {
   QrCode,
   SignOut,
   UsersThree,
-  XCircle,
 } from "@phosphor-icons/react";
 import { useEffect, useState } from "react";
-import { DashboardData, EventSummary, getDashboard, getEvents, processAccess } from "@/lib/api";
+import { AccessLogSummary, DashboardData, EventSummary, getAdminCollection, getDashboard, getEvents } from "@/lib/api";
 import { ModuleView } from "@/components/module-view";
-
-type ScanState = "idle" | "success" | "duplicate" | "error";
-
-const accessRows = [
-  { name: "Adrián Morales", action: "Entrada", time: "23:48", status: "success" },
-  { name: "Maya Thompson", action: "Entrada", time: "23:43", status: "success" },
-  { name: "Damián Reyes", action: "Salida", time: "23:39", status: "out" },
-  { name: "Sofía Ortega", action: "Entrada", time: "23:31", status: "success" },
-];
-
-const events = [
-  { name: "SOMA Afterdark: Edgar Cal", date: "Hoy · 22:00", fill: "184 / 250", status: "Activo" },
-  { name: "Velvet Frequency", date: "Sáb · 21:00", fill: "96 / 180", status: "Publicado" },
-  { name: "Room 02: Open Format", date: "Vie · 22:30", fill: "0 / 140", status: "Draft" },
-];
 
 function NavItem({ active, children, icon: Icon, onClick }: { active?: boolean; children: string; icon: typeof House; onClick?: () => void }) {
   return (
@@ -57,52 +41,37 @@ function Metric({ value, label, note, accent }: { value: string; label: string; 
 }
 
 export function Dashboard({ accessToken, userName, onLogout }: { accessToken: string; userName: string; onLogout: () => void }) {
-  const [scannerOpen, setScannerOpen] = useState(false);
-  const [scanState, setScanState] = useState<ScanState>("idle");
-  const [mode, setMode] = useState<"Entrada" | "Salida">("Entrada");
   const [apiEvents, setApiEvents] = useState<EventSummary[] | null>(null);
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
+  const [accessLogs, setAccessLogs] = useState<AccessLogSummary[]>([]);
   const [apiError, setApiError] = useState("");
-  const [scanToken, setScanToken] = useState("");
-  const [scanMessage, setScanMessage] = useState("");
   const [module, setModule] = useState<"dashboard" | "events" | "reservations" | "clients" | "staff" | "access-logs">("dashboard");
 
   useEffect(() => {
-    const load = () => Promise.all([getEvents(accessToken), getDashboard(accessToken)])
-      .then(([events, dashboardData]) => { setApiEvents(events); setDashboard(dashboardData); })
+    const load = () => Promise.all([getEvents(accessToken), getDashboard(accessToken), getAdminCollection<AccessLogSummary>(accessToken, "access-logs")])
+      .then(([events, dashboardData, logs]) => { setApiEvents(events); setDashboard(dashboardData); setAccessLogs(logs); setApiError(""); })
       .catch((error: unknown) => setApiError(error instanceof Error ? error.message : "No fue posible cargar los eventos."));
     load();
     const timer = window.setInterval(load, 10_000);
     return () => window.clearInterval(timer);
   }, [accessToken]);
 
-  const displayedEvents = apiEvents?.map((event) => ({
+  const displayedEvents = (apiEvents ?? []).map((event) => ({
     name: event.title,
     date: new Intl.DateTimeFormat("es-MX", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }).format(new Date(event.startsAt)),
     fill: `${event.occupiedSlots} / ${event.capacity}`,
     status: event.status,
-  })) ?? events;
+  }));
   const activeEvent = dashboard?.activeEvent;
   const metrics = dashboard?.metrics;
-  const activeTitle = activeEvent?.title ?? "SOMA Afterdark: Edgar Cal";
-  const capacity = metrics?.capacity ?? 250;
-  const occupied = metrics?.occupiedSlots ?? 184;
-  const available = metrics?.availableSlots ?? 66;
-  const inside = metrics?.insideNow ?? 132;
-  const checkIns = metrics?.checkedIn ?? 147;
-  const checkOuts = metrics?.checkedOut ?? 15;
-
-  async function processManualAccess() {
-    if (!activeEvent || !scanToken.trim()) return;
-    try {
-      const result = await processAccess(accessToken, mode === "Entrada" ? "check-in" : "check-out", activeEvent.id, scanToken);
-      setScanMessage(result.result);
-      setScanState(result.result === "Success" ? "success" : "error");
-    } catch (error) {
-      setScanMessage(error instanceof Error ? error.message : "Error de acceso.");
-      setScanState("error");
-    }
-  }
+  const capacity = metrics?.capacity ?? 0;
+  const occupied = metrics?.occupiedSlots ?? 0;
+  const available = metrics?.availableSlots ?? 0;
+  const inside = metrics?.insideNow ?? 0;
+  const checkIns = metrics?.checkedIn ?? 0;
+  const checkOuts = metrics?.checkedOut ?? 0;
+  const occupation = capacity ? (occupied / capacity) * 100 : 0;
+  const filledCapacityLines = Math.round((occupation / 100) * 25);
 
   return (
     <main className="app-shell">
@@ -117,7 +86,7 @@ export function Dashboard({ accessToken, userName, onLogout }: { accessToken: st
           <NavItem active={module === "clients"} icon={UsersThree} onClick={() => setModule("clients")}>Clientes</NavItem>
           <NavItem active={module === "staff"} icon={UsersThree} onClick={() => setModule("staff")}>Staff</NavItem>
           <p className="nav-section nav-section-space">ACCESO</p>
-          <NavItem icon={QrCode} onClick={() => { setModule("dashboard"); setScannerOpen(true); }}>Scanner</NavItem>
+          <NavItem icon={QrCode} onClick={() => window.location.assign("/scanner")}>Scanner</NavItem>
           <NavItem active={module === "access-logs"} icon={Clock} onClick={() => setModule("access-logs")}>Registro de accesos</NavItem>
         </nav>
         <div className="staff-card">
@@ -133,7 +102,7 @@ export function Dashboard({ accessToken, userName, onLogout }: { accessToken: st
           <div><p className="eyebrow">CONTROL OPERATIVO</p><h1>Buenas noches, {userName.split(" ")[0]}.</h1></div>
           <div className="topbar-actions">
             <button className="icon-button" aria-label="Buscar"><MagnifyingGlass size={21} /></button>
-            <button className="primary-button" onClick={() => { setScannerOpen(true); setScanState("idle"); }}>
+            <button className="primary-button" onClick={() => window.location.assign("/scanner")}>
               <QrCode size={19} weight="bold" /> Abrir scanner
             </button>
           </div>
@@ -142,13 +111,13 @@ export function Dashboard({ accessToken, userName, onLogout }: { accessToken: st
         <section className="event-hero">
           <div className="hero-scrim" />
           <div className="hero-copy">
-            <div className="hero-status"><span className="live-dot" /> EN CURSO</div>
-            <h2>{activeTitle}</h2>
-            <p>Hoy, 22:00 - 04:00 · Sala principal</p>
+            <div className="hero-status"><span className="live-dot" /> {activeEvent ? "EN CURSO" : "SIN EVENTO ACTIVO"}</div>
+            <h2>{activeEvent?.title ?? "Sin evento activo"}</h2>
+            <p>{activeEvent ? new Intl.DateTimeFormat("es-MX", { dateStyle: "full", timeStyle: "short" }).format(new Date(activeEvent.startsAt)) : "Crea y activa un evento para comenzar a operar."}</p>
           </div>
           <div className="hero-meta">
             <div><span>CUPO OCUPADO</span><strong>{occupied} <i>/ {capacity}</i></strong></div>
-            <button onClick={() => setScannerOpen(true)}>Ver acceso <ArrowUpRight size={17} /></button>
+            <button onClick={() => window.location.assign("/scanner")}>Ver acceso <ArrowUpRight size={17} /></button>
           </div>
         </section>
 
@@ -166,24 +135,25 @@ export function Dashboard({ accessToken, userName, onLogout }: { accessToken: st
               <button className="text-button" onClick={() => setModule("access-logs")}>Ver registro <ArrowUpRight size={16} /></button>
             </header>
             <div className="access-list">
-              {accessRows.map((row) => (
-                <div className="access-row" key={row.name}>
-                  <div className={"access-symbol " + row.status}>{row.status === "out" ? <DoorOpen size={18} /> : <CheckCircle size={18} weight="fill" />}</div>
-                  <div className="access-person"><strong>{row.name}</strong><span>{row.action} registrada</span></div>
-                  <time>{row.time}</time>
+              {accessLogs.slice(0, 4).map((log) => (
+                <div className="access-row" key={log.id}>
+                  <div className={"access-symbol " + (log.action === "CheckOut" ? "out" : "success")}>{log.action === "CheckOut" ? <DoorOpen size={18} /> : <CheckCircle size={18} weight="fill" />}</div>
+                  <div className="access-person"><strong>{log.clientName ?? (log.result === "Success" ? "Cliente registrado" : "Intento de acceso")}</strong><span>{log.action === "CheckOut" ? "Salida" : "Entrada"} · {log.eventTitle ?? log.result}</span></div>
+                  <time>{new Intl.DateTimeFormat("es-MX", { hour: "2-digit", minute: "2-digit" }).format(new Date(log.createdAt))}</time>
                 </div>
               ))}
+              {!accessLogs.length && <p className="detail-muted">Aún no hay accesos registrados.</p>}
             </div>
           </article>
 
           <article className="surface capacity-panel">
             <header className="panel-header"><div><p className="eyebrow">AFORO</p><h2>Estado del venue</h2></div><DotsThree size={22} /></header>
-            <div className="capacity-value"><strong>73.6%</strong><span>ocupación actual</span></div>
-            <div className="capacity-lines" aria-label="184 de 250 lugares ocupados">
-              {Array.from({ length: 25 }, (_, index) => <span key={index} className={index < 18 ? "filled" : ""} />)}
+            <div className="capacity-value"><strong>{occupation.toFixed(1)}%</strong><span>ocupación actual</span></div>
+            <div className="capacity-lines" aria-label={`${occupied} de ${capacity} lugares ocupados`}>
+              {Array.from({ length: 25 }, (_, index) => <span key={index} className={index < filledCapacityLines ? "filled" : ""} />)}
             </div>
-            <div className="capacity-footer"><span>184 ocupados</span><span>66 disponibles</span></div>
-            <button className="secondary-button" onClick={() => setScannerOpen(true)}>Gestionar acceso <ArrowUpRight size={17} /></button>
+            <div className="capacity-footer"><span>{occupied} ocupados</span><span>{available} disponibles</span></div>
+            <button className="secondary-button" onClick={() => window.location.assign("/scanner")}>Gestionar acceso <ArrowUpRight size={17} /></button>
           </article>
         </section>
 
@@ -192,29 +162,14 @@ export function Dashboard({ accessToken, userName, onLogout }: { accessToken: st
           <div className="event-table">
             <div className="table-head"><span>EVENTO</span><span>FECHA</span><span>CUPO</span><span>ESTADO</span><span /></div>
             {displayedEvents.map((event, index) => <div className="table-row" key={event.name}>
-              <div className={"event-thumb thumb-" + (index % 3)} /><strong>{event.name}</strong><span>{event.date}</span><span className="mono">{event.fill}</span><Status tone={event.status === "Activo" || event.status === "Active" ? "live" : event.status === "Draft" ? "draft" : "neutral"}>{event.status}</Status><button className="row-menu" aria-label={"Acciones para " + event.name}><DotsThree size={20} /></button>
+              <div className={"event-thumb thumb-" + (index % 3)} /><strong>{event.name}</strong><span>{event.date}</span><span className="mono">{event.fill}</span><Status tone={event.status === "Active" ? "live" : event.status === "Draft" ? "draft" : "neutral"}>{event.status}</Status><button className="row-menu" aria-label={"Acciones para " + event.name}><DotsThree size={20} /></button>
             </div>)}
+            {!displayedEvents.length && <div className="module-state">Aún no hay eventos creados.</div>}
           </div>
           {apiError && <p className="dashboard-error">{apiError}</p>}
         </section>
         </>}
       </section>
-
-      {scannerOpen && <div className="scanner-layer" role="dialog" aria-modal="true" aria-label="Scanner de acceso">
-        <section className="scanner">
-          <header className="scanner-header"><button className="icon-button" onClick={() => setScannerOpen(false)}>×</button><div><span>EVENTO ACTIVO</span><strong>SOMA Afterdark: Edgar Cal</strong></div><button className="scanner-mode">{mode}</button></header>
-          <div className="mode-switch" role="group" aria-label="Modo de acceso">
-            {(["Entrada", "Salida"] as const).map((item) => <button onClick={() => { setMode(item); setScanState("idle"); }} className={mode === item ? "mode-active" : ""} key={item}>{item}</button>)}
-          </div>
-          <div className="camera-window" aria-label="Área de cámara del scanner">
-            <span className="scan-frame" /><QrCode size={56} weight="thin" /><small>LECTOR DE CÓDIGO QR</small>
-          </div>
-          <div className="scan-prompt"><QrCode size={22} /><p>Apunta la cámara al código QR o ingresa el token.</p><input value={scanToken} onChange={(event) => setScanToken(event.target.value)} placeholder="Token QR" /><button onClick={processManualAccess} disabled={!activeEvent || !scanToken.trim()}>Validar</button></div>
-          {scanState === "success" && <div className="scan-result success"><CheckCircle size={39} weight="fill" /><div><span>{mode.toUpperCase()} AUTORIZADA</span><strong>{scanMessage}</strong><p>Acceso registrado</p></div><button onClick={() => { setScanState("idle"); setScanToken(""); }}>Siguiente</button></div>}
-          {scanState === "error" && <div className="scan-result duplicate"><XCircle size={39} weight="fill" /><div><span>ACCESO NO AUTORIZADO</span><strong>{scanMessage}</strong><p>Verifica el evento y el estado del QR.</p></div><button onClick={() => setScanState("idle")}>Reintentar</button></div>}
-          {scanState === "duplicate" && <div className="scan-result duplicate"><XCircle size={39} weight="fill" /><div><span>QR YA UTILIZADO</span><strong>Entrada registrada</strong><p>23:31 · Adrián Morales</p></div></div>}
-        </section>
-      </div>}
     </main>
   );
 }
